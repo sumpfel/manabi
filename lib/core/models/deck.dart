@@ -1,0 +1,100 @@
+enum DeckType { custom, manga, unit, kanji, aiChat }
+
+class Deck {
+  final int? id;
+  final String name;
+  final String? description;
+  final int createdAt;
+  final DeckType deckType;
+  final String? thumbnailPath; // Path to thumbnail image
+  final bool isSrsEnabled; // Whether to include in global SRS
+  final String? parentUnitId; // ID of the unit this deck belongs to
+  final int? parentDeckId; // ID of parent deck for sub-sections
+  final String? section; // Sub-section label (e.g. "na-Adjektive")
+  final String? category; // User-defined category (e.g. "JLPT", "Manga", "Recent")
+  final bool isOfficial; // Official JLPT decks etc.
+  final int downloadCount; // Community download counter
+
+  Deck({
+    this.id,
+    required this.name,
+    this.description,
+    required this.createdAt,
+    this.deckType = DeckType.custom,
+    this.thumbnailPath,
+    this.isSrsEnabled = false,
+    this.parentUnitId,
+    this.parentDeckId,
+    this.section,
+    this.category,
+    this.isOfficial = false,
+    this.downloadCount = 0,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      if (id != null) 'id': id,
+      'name': name,
+      'description': description,
+      'created_at': createdAt,
+      'deck_type': _typeToDb(deckType),
+      'thumbnail_path': thumbnailPath,
+      'is_srs_enabled': isSrsEnabled ? 1 : 0,
+      'parent_unit_id': parentUnitId,
+      'parent_deck_id': parentDeckId,
+      'section': section,
+      'category': category,
+      'is_official': isOfficial ? 1 : 0,
+      'download_count': downloadCount,
+    };
+  }
+
+  static String _typeToDb(DeckType type) {
+    if (type == DeckType.aiChat) return 'ai_chat';
+    return type.name;
+  }
+
+  static DeckType _typeFromDb(String name) {
+    if (name == 'ai_chat') return DeckType.aiChat;
+    return DeckType.values.firstWhere(
+      (e) => e.name == name,
+      orElse: () => DeckType.custom,
+    );
+  }
+
+  factory Deck.fromMap(Map<String, dynamic> map) {
+    return Deck(
+      id: map['id'],
+      name: map['name'],
+      description: map['description'],
+      createdAt: map['created_at'],
+      deckType: _typeFromDb(map['deck_type'] ?? 'custom'),
+      thumbnailPath: map['thumbnail_path'],
+      isSrsEnabled: (map['is_srs_enabled'] ?? 0) == 1,
+      parentUnitId: map['parent_unit_id'],
+      parentDeckId: map['parent_deck_id'],
+      section: map['section'],
+      category: map['category'],
+      isOfficial: (map['is_official'] ?? 0) == 1,
+      downloadCount: map['download_count'] ?? 0,
+    );
+  }
+
+  Deck copyWith({int? id, String? name, String? description, int? createdAt, DeckType? deckType, String? thumbnailPath, bool? isSrsEnabled, String? parentUnitId, int? parentDeckId, String? section, String? category, bool? isOfficial, int? downloadCount}) {
+    return Deck(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      description: description ?? this.description,
+      createdAt: createdAt ?? this.createdAt,
+      deckType: deckType ?? this.deckType,
+      thumbnailPath: thumbnailPath ?? this.thumbnailPath,
+      isSrsEnabled: isSrsEnabled ?? this.isSrsEnabled,
+      parentUnitId: parentUnitId ?? this.parentUnitId,
+      parentDeckId: parentDeckId ?? this.parentDeckId,
+      section: section ?? this.section,
+      category: category ?? this.category,
+      isOfficial: isOfficial ?? this.isOfficial,
+      downloadCount: downloadCount ?? this.downloadCount,
+    );
+  }
+}
