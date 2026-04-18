@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:collection/collection.dart';
 import '../../core/services/settings_service.dart';
+import '../../core/services/ai_service.dart';
 
 class AiSettingsScreen extends ConsumerStatefulWidget {
   const AiSettingsScreen({super.key});
@@ -35,6 +37,11 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final notifier = ref.read(settingsProvider.notifier);
+    final ollamaModelsAsync = ref.watch(ollamaModelsProvider);
+    
+    // Merge fetched Ollama models with hardcoded ones if needed, 
+    // or just use fetched ones.
+    final fetchedOllamaModels = ollamaModelsAsync.value ?? [];
 
     return Scaffold(
       appBar: AppBar(title: const Text('KI-Einstellungen')),
@@ -123,15 +130,15 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
           const Text('KI-Modell', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           DropdownButtonFormField<String>(
-            value: _modelsForProvider(settings.aiProvider).contains(settings.aiModel)
+            value: _modelsForProvider(settings.aiProvider, fetchedOllamaModels).contains(settings.aiModel)
                 ? settings.aiModel
-                : _modelsForProvider(settings.aiProvider).first,
+                : _modelsForProvider(settings.aiProvider, fetchedOllamaModels).firstOrNull ?? 'gemini-2.0-flash',
             itemHeight: 64.0,
             decoration: InputDecoration(
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               prefixIcon: const Icon(Icons.smart_toy),
             ),
-            items: _buildModelDropdownItems(settings.aiProvider),
+            items: _buildModelDropdownItems(settings.aiProvider, fetchedOllamaModels),
             onChanged: (v) {
               if (v != null) notifier.updateAiModel(v);
             },
@@ -155,22 +162,32 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
           const SizedBox(height: 24),
 
           // Chat display options
-          const Text('Chat-Anzeige', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const Text('Anzeige & Tutor', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           SwitchListTile(
-            title: const Text('Romaji im Chat anzeigen'),
-            value: settings.showRomajiInChat,
-            onChanged: (v) => notifier.toggleRomajiInChat(v),
+            title: const Text('Furigana anzeigen'),
+            subtitle: const Text('Lesehilfen über Kanji einblenden'),
+            value: settings.showFurigana,
+            onChanged: (v) => notifier.toggleShowFurigana(v),
+            activeColor: Theme.of(context).colorScheme.primary,
           ),
           SwitchListTile(
-            title: const Text('Hiragana-Lesungen anzeigen'),
-            value: settings.showHiraganaInChat,
-            onChanged: (v) => notifier.toggleHiraganaInChat(v),
+            title: const Text('Grammatik-Farben'),
+            subtitle: const Text('Wortarten farblich hervorheben'),
+            value: settings.showColorGrammar,
+            onChanged: (v) => notifier.toggleShowColorGrammar(v),
+            activeColor: Theme.of(context).colorScheme.primary,
           ),
-          SwitchListTile(
-            title: const Text('Deutsche Sätze einfärben'),
-            value: settings.colorGermanSentences,
-            onChanged: (v) => notifier.toggleColorGerman(v),
+          const SizedBox(height: 12),
+          const Text('Erklärungs-Sprache', style: TextStyle(fontSize: 14, color: Colors.white70)),
+          const SizedBox(height: 8),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'de', label: Text('Deutsch'), icon: Icon(Icons.language)),
+              ButtonSegment(value: 'ja', label: Text('Japanisch'), icon: Icon(Icons.translate)),
+            ],
+            selected: {settings.aiExplanationLanguage},
+            onSelectionChanged: (v) => notifier.updateAiExplanationLanguage(v.first),
           ),
           const SizedBox(height: 24),
 
@@ -185,12 +202,14 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
           const SizedBox(height: 24),
 
           // Vocab restrictions
-          const Text('Vokabel-Einschränkungen', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const Text('KI-Verhalten', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
           SwitchListTile(
-            title: const Text('Nur bekannte Vokabeln verwenden'),
-            subtitle: const Text('KI verwendet nur Wörter aus deinen Decks'),
+            title: const Text('Nur bekannte Vokabeln'),
+            subtitle: const Text('KI nutzt Wörter aus deinen Decks'),
             value: settings.restrictToKnownVocab,
             onChanged: (v) => notifier.toggleRestrictVocab(v),
+            activeColor: Theme.of(context).colorScheme.primary,
           ),
           ListTile(
             title: const Text('Max. neue Wörter pro Antwort'),
@@ -223,40 +242,74 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
     );
   }
 
-  List<String> _modelsForProvider(String provider) {
+  List<String> _modelsForProvider(String provider, List<Map<String, dynamic>> ollamaModels) {
     switch (provider) {
       case 'openai':
         return ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'o4-mini'];
       case 'anthropic':
         return ['claude-sonnet-4-5-20250514', 'claude-haiku-4-5-20251001', 'claude-opus-4-6-20250618'];
       case 'ollama':
-        return ['llama3.2:3b', 'mistral:7b', 'gemma:2b', 'qwen2.5:7b', 'llama3'];
+        if (ollamaModels.isNotEmpty) {
+          return ollamaModels.map((m) => m['name'] as String).toList();
+        }
+        return ['gemma4:latest', 'llama3.2:3b', 'gemma2:9b', 'phi4:14b', 'mistral:7b', 'gemma2:27b', 'qwen2.5:7b', 'llama3'];
       default:
         return ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-2.5-flash-preview-05-20', 'gemini-2.5-pro-preview-05-06'];
     }
   }
 
-  List<DropdownMenuItem<String>> _buildModelDropdownItems(String provider) {
+  List<DropdownMenuItem<String>> _buildModelDropdownItems(String provider, List<Map<String, dynamic>> fetchedOllamaModels) {
     if (provider != 'ollama') {
-      return _modelsForProvider(provider).map((m) => DropdownMenuItem(value: m, child: Text(m))).toList();
+      return _modelsForProvider(provider, []).map((m) => DropdownMenuItem(value: m, child: Text(m))).toList();
     }
+    
+    // If we have fetched models, use them
+    if (fetchedOllamaModels.isNotEmpty) {
+      return fetchedOllamaModels.map((m) {
+        final name = m['name'] as String;
+        final size = m['size_gb'] as double;
+        final quality = m['quality'] as String;
+        return DropdownMenuItem<String>(
+          value: name,
+          child: SizedBox(
+            height: 64,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(name, style: const TextStyle(color: Colors.white, fontSize: 13, height: 1.1)),
+                Text('$quality (${size} GB)', style: const TextStyle(color: Colors.white54, fontSize: 9, height: 1.1), overflow: TextOverflow.ellipsis),
+              ],
+            ),
+          ),
+        );
+      }).toList();
+    }
+
+    // Fallback to hardcoded list if fetch failed or still loading
     final ollamaModels = [
+      {'id': 'gemma4:latest', 'desc': 'Neuestes Modell (9.6 GB)'},
       {'id': 'llama3.2:3b', 'desc': 'Schnell, gut für Sprachen'},
+      {'id': 'gemma2:9b', 'desc': 'Empfohlen (Ausgewogen)'},
+      {'id': 'phi4:14b', 'desc': 'Sehr logisch, hohe Qualität'},
       {'id': 'mistral:7b', 'desc': 'Gutes logisches  Verständnis'},
-      {'id': 'gemma:2b', 'desc': 'Sehr schnell, kompakt'},
+      {'id': 'gemma2:27b', 'desc': 'Exzellent (Langsam, viel VRAM)'},
       {'id': 'qwen2.5:7b', 'desc': 'Exzellente Grammatik (N1)'},
       {'id': 'llama3', 'desc': 'Allrounder (Hohe Qualität)'},
     ];
     return ollamaModels.map((m) {
       return DropdownMenuItem<String>(
         value: m['id']!,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(m['id']!, style: const TextStyle(color: Colors.white, fontSize: 14)),
-            Text(m['desc']!, style: const TextStyle(color: Colors.white54, fontSize: 10)),
-          ],
+        child: SizedBox(
+          height: 64, // Match itemHeight
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center, // Center vertically
+            children: [
+              Text(m['id']!, style: const TextStyle(color: Colors.white, fontSize: 13, height: 1.1)),
+              Text(m['desc']!, style: const TextStyle(color: Colors.white54, fontSize: 9, height: 1.1), overflow: TextOverflow.ellipsis),
+            ],
+          ),
         ),
       );
     }).toList();

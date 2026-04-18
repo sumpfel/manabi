@@ -315,16 +315,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       'unitProgress': false,
       'vocabStats': false,
       'customDecks': false,
-      'unitDecks': false,
-      'mangaDecks': false,
       'mangaBookmarks': false,
     };
     final labels = {
       'unitProgress': 'Unit-Fortschritt (Lektionen & Genauigkeit)',
       'vocabStats': 'Vokabel-Statistiken (Richtig/Falsch, Streaks)',
       'customDecks': 'Eigene Vokabel-Decks löschen',
-      'unitDecks': 'Unit-Decks löschen',
-      'mangaDecks': 'Manga-Decks löschen',
       'mangaBookmarks': 'Manga-Lesezeichen löschen',
     };
 
@@ -374,14 +370,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     if (checks['customDecks']!) {
       await repo.deleteCustomDecks();
       deleted.add('Eigene Decks');
-    }
-    if (checks['unitDecks']!) {
-      await repo.deleteUnitDecks();
-      deleted.add('Unit-Decks');
-    }
-    if (checks['mangaDecks']!) {
-      await repo.deleteMangaDecks();
-      deleted.add('Manga-Decks');
     }
     if (checks['mangaBookmarks']!) {
       await repo.deleteMangaBookmarks();

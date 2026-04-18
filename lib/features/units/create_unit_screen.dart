@@ -4,7 +4,13 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/services/settings_service.dart';
+import '../../core/services/ai_service.dart';
 import '../../core/models/lesson.dart';
+import '../../core/models/unit.dart';
+import '../../core/models/deck.dart';
+import '../../core/database/unit_repository.dart';
+import '../../core/database/vocab_repository.dart';
+import 'units_screen.dart';
 
 // ── Unit Creator Screen ──
 
@@ -202,30 +208,82 @@ class _CreateUnitScreenState extends ConsumerState<CreateUnitScreen> {
     if (prompt.trim().isEmpty) return;
     setState(() => _isAiGenerating = true);
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('KI generiert Unit... Das kann 1-2 Minuten dauern.')));
+    
     try {
       final settings = ref.read(settingsProvider);
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      final res = await http.post(
-        Uri.parse('${settings.effectiveBackendUrl}/api/ai/generate_unit'),
-        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'prompt': prompt,
-          'model': settings.selectedOllamaModel,
-          'cefr_level': _cefrLevel,
-          'mother_tongue': settings.motherTongue,
-          'learning_lang': 'ja',
-          'is_public': _isPublic,
-        }),
-      ).timeout(const Duration(seconds: 300));
-      if (res.statusCode == 200 && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ Unit erstellt!'), backgroundColor: Colors.green));
-        Navigator.pop(context);
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: ${res.statusCode}'), backgroundColor: Colors.red));
-      }
+      final aiService = ref.read(aiServiceProvider);
+      
+      final mtName = settings.motherTongue == 'en' ? 'English' : 'Deutsch';
+      
+      final sysPrompt = '''Du bist ein erfahrener Japanisch-Lehrer. Erstelle eine vollständige Lerneinheit (Unit) basierend auf dem Thema des Benutzers.
+Sprachniveau: $_cefrLevel.
+Antworte ausschließlich im JSON-Format.
+
+FORMAT-VORGABE (JSON):
+{
+  "title": "Unit Titel",
+  "description": "Kurze Beschreibung",
+  "lessons": [
+    {
+      "title": "Lektionstitel",
+      "description": "Was man lernt",
+      "lesson_type": "grammarIntro",
+      "grammar_explanation": "Ausführliche Erklärung in $mtName mit Beispielen",
+      "vocab": [
+        {"word": "私", "reading": "わたし", "translation": "Ich"}
+      ],
+      "exercises": [
+        {
+          "type": "multiple_choice",
+          "question": "Frage",
+          "instruction": "Anweisung",
+          "options": ["O1", "O2", "O3", "O4"],
+          "correctOption": "O1"
+        }
+      ]
+    }
+  ]
+}
+Gültige Lesson-Typen: vocabGate, grammarIntro, grammarProduction, mixedReinforcement, unitTest.
+Gültige Übungs-Typen: multiple_choice, typing, fill_in_blank, flashcard, matching, sentence_building.
+Generiere 2-3 Lektionen.''';
+
+      final response = await aiService.queryAi(
+        prompt: prompt,
+        systemPrompt: sysPrompt,
+      );
+      
+      final cleanJson = response.contains('```json') 
+          ? response.split('```json')[1].split('```')[0].trim()
+          : response.trim();
+          
+      final data = jsonDecode(cleanJson);
+      
+      setState(() {
+        _titleController.text = data['title'] ?? _titleController.text;
+        _descController.text = data['description'] ?? _descController.text;
+        _lessons.clear();
+        
+        final List<dynamic> lessonsRaw = data['lessons'] ?? [];
+        for (final l in lessonsRaw) {
+          _lessons.add(_LessonDraft(
+            title: l['title'] ?? 'Neue Lektion',
+            description: l['description'] ?? '',
+            grammarMarkdown: l['grammar_explanation'] ?? '',
+            requiredAccuracy: (l['required_accuracy'] as num?)?.toDouble() ?? 0.8,
+            vocabList: (l['vocab'] as List? ?? []).map((v) => {
+              'word': (v['word'] ?? '').toString(),
+              'reading': (v['reading'] ?? '').toString(),
+              'translation': (v['translation'] ?? '').toString(),
+            }).toList(),
+            exercises: (l['exercises'] as List? ?? []).map((e) => Exercise.fromMap(e)).toList(),
+          ));
+        }
+      });
+
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ KI-Entwurf erstellt! Bitte prüfen und speichern.'), backgroundColor: Colors.green));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('KI Fehler: $e'), backgroundColor: Colors.red));
     } finally {
       if (mounted) setState(() => _isAiGenerating = false);
     }
@@ -239,40 +297,97 @@ class _CreateUnitScreenState extends ConsumerState<CreateUnitScreen> {
     setState(() => _isSaving = true);
     try {
       final settings = ref.read(settingsProvider);
-      final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('jwt_token') ?? '';
-      // Build exercises JSON for each lesson
-      final lessonsJson = _lessons.map((l) => {
-        'title': l.title,
-        'description': l.description,
-        'grammar_markdown': l.grammarMarkdown,
-        'required_accuracy': l.requiredAccuracy,
-        'exercises': l.exercises.map((e) => e.toMap()).toList(),
-        'vocab': l.vocabList.map((v) => {'word': v['word'], 'reading': v['reading'], 'translation': v['translation']}).toList(),
-      }).toList();
+      final unitRepo = ref.read(unitRepositoryProvider);
+      final vocabRepo = ref.read(vocabRepositoryProvider);
+      
+      final unitId = 'custom_unit_${DateTime.now().millisecondsSinceEpoch}';
+      
+      // 1. Create Lessons
+      final List<Lesson> lessons = [];
+      for (int i = 0; i < _lessons.length; i++) {
+        final d = _lessons[i];
+        lessons.add(Lesson(
+          id: '${unitId}_l$i',
+          unitId: unitId,
+          title: d.title,
+          description: d.description,
+          lessonType: LessonType.grammarIntro, // Standard fallback
+          grammarExplanation: d.grammarMarkdown,
+          requiredAccuracy: d.requiredAccuracy,
+          exercises: d.exercises,
+          vocabularyList: d.vocabList,
+        ));
+      }
 
-      final res = await http.post(
-        Uri.parse('${settings.effectiveBackendUrl}/api/units/'),
-        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'title': _titleController.text.trim(),
-          'description': _descController.text.trim(),
-          'language_level': _cefrLevel,
-          'is_public': _isPublic,
-          'lessons': lessonsJson,
-        }),
-      ).timeout(const Duration(seconds: 30));
+      // 2. Create Unit
+      final unit = Unit(
+        id: unitId,
+        title: _titleController.text.trim(),
+        description: _descController.text.trim(),
+        lessons: lessons,
+        unitVocab: [], // Populated in the deck
+      );
 
-      if (res.statusCode == 200 && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ Unit gespeichert!'), backgroundColor: Colors.green));
-        Navigator.pop(context);
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: ${res.statusCode}. Lokal gespeichert.'), backgroundColor: Colors.orange));
+      // 3. Save to local DB
+      await unitRepo.insertUnit(unit);
+
+      // 4. Create a Deck for this unit
+      final deckId = await vocabRepo.insertDeck(Deck(
+        name: 'Unit: ${unit.title}',
+        deckType: DeckType.unit,
+        parentUnitId: unitId,
+        isAiGenerated: true,
+        createdAt: DateTime.now().millisecondsSinceEpoch,
+      ));
+
+      // 5. Add all vocab to the deck
+      for (final l in _lessons) {
+        for (final v in l.vocabList) {
+          await vocabRepo.insertVocabFromStrings(
+            deckId: deckId,
+            wordText: v['word'] ?? '',
+            readingText: v['reading'] ?? '',
+            translationText: v['translation'] ?? '',
+          );
+        }
+      }
+
+      // 6. Optional: Sync to backend if available
+      if (settings.hasBackend) {
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final token = prefs.getString('jwt_token') ?? '';
+          await http.post(
+            Uri.parse('${settings.effectiveBackendUrl}/api/units/'),
+            headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'title': unit.title,
+              'description': unit.description,
+              'language_level': _cefrLevel,
+              'is_public': _isPublic,
+              'lessons': _lessons.map((l) => {
+                'title': l.title,
+                'description': l.description,
+                'grammar_markdown': l.grammarMarkdown,
+                'required_accuracy': l.requiredAccuracy,
+                'exercises': l.exercises.map((e) => e.toMap()).toList(),
+                'vocab': l.vocabList,
+              }).toList(),
+            }),
+          ).timeout(const Duration(seconds: 10));
+        } catch (_) {
+          // Ignore backend sync failures, local is saved
+        }
+      }
+
+      if (mounted) {
+        ref.invalidate(unitsProvider);
+        ref.invalidate(decksProvider);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ Unit lokal gespeichert!'), backgroundColor: Colors.green));
         Navigator.pop(context);
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Offline gespeichert. Syncs beim nächsten Start.'), backgroundColor: Colors.orange));
-      if (mounted) Navigator.pop(context);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler beim Speichern: $e'), backgroundColor: Colors.red));
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }

@@ -11,6 +11,11 @@ final vocabRepositoryProvider = Provider<VocabRepository>((ref) {
   return VocabRepository(dbService, backendService);
 });
 
+final decksProvider = FutureProvider<List<Deck>>((ref) async {
+  final repo = ref.watch(vocabRepositoryProvider);
+  return await repo.getDecks();
+});
+
 class VocabRepository {
   final DatabaseService _dbService;
   final BackendService _backendService;
@@ -37,6 +42,8 @@ class VocabRepository {
     _backendService.syncDecks();
     return id;
   }
+
+  Future<int> insertDeck(Deck deck) => addDeck(deck);
 
   Future<List<Vocab>> getVocabForDeck(int deckId) async {
     final db = await _dbService.database;
@@ -126,6 +133,28 @@ class VocabRepository {
   Future<int> addVocab(Vocab vocab) async {
     final db = await _dbService.database;
     return await db.insert('vocab', vocab.toMap());
+  }
+
+  Future<int> insertVocab(Vocab vocab) => addVocab(vocab);
+
+  Future<int> insertVocabFromStrings({
+    required int deckId,
+    required String wordText,
+    required String readingText,
+    required String translationText,
+    String? exampleText,
+    String? exampleTranslation,
+  }) async {
+    final db = await _dbService.database;
+    return await db.insert('vocab', {
+      'deck_id': deckId,
+      'kanji': wordText,
+      'kana': readingText,
+      'translation': translationText,
+      'example': exampleText,
+      'example_translation': exampleTranslation,
+      'due_date': DateTime.now().millisecondsSinceEpoch,
+    });
   }
 
   Future<int> updateVocab(Vocab vocab) async {

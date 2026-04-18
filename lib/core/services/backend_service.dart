@@ -87,7 +87,13 @@ class BackendService {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
         },
-        body: jsonEncode({'prompt': prompt, 'model': 'llama3'}),
+        body: jsonEncode({
+          'prompt': prompt,
+          'model': _settings.selectedOllamaModel,
+          'learning_lang': 'ja',
+          'mother_tongue': _settings.motherTongue,
+          'cefr_level': _settings.aiLanguageLevel,
+        }),
       ).timeout(const Duration(seconds: 30));
       if (resp.statusCode == 200) return jsonDecode(resp.body);
     } catch (_) {}

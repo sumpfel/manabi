@@ -11,6 +11,13 @@ import '../../core/services/streak_service.dart';
 import '../../core/services/study_service.dart';
 import '../../core/database/vocab_repository.dart';
 
+import '../../core/database/unit_repository.dart';
+
+final unitsProvider = FutureProvider<List<Unit>>((ref) async {
+  final customUnits = await ref.read(unitRepositoryProvider).getCustomUnits();
+  return [...CourseData.units, ...customUnits];
+});
+
 class _NodeItem {
   final bool isHeader;
   final Unit? unit;
@@ -30,33 +37,38 @@ class UnitsScreen extends ConsumerWidget {
     final theme = Theme.of(context);
     final Size screenSize = MediaQuery.of(context).size;
 
-    final units = CourseData.units;
+    final unitsAsync = ref.watch(unitsProvider);
     final progress = ref.watch(progressProvider);
     final studyService = ref.read(studyServiceProvider);
 
-    final List<_NodeItem> nodes = [];
-    int globalLessonIndex = 0;
-    int firstIncompleteGlobalIndex = -1;
-    
-    for (int i = 0; i < units.length; i++) {
-      final unit = units[i];
-      nodes.add(_NodeItem.header(unit, i));
-      
-      for (int j = 0; j < unit.lessons.length; j++) {
-        final lesson = unit.lessons[j];
-        nodes.add(_NodeItem.lesson(lesson, globalLessonIndex, i));
+    return unitsAsync.when(
+      loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
+      error: (err, stack) => Scaffold(body: Center(child: Text('Fehler beim Laden der Units: $err'))),
+      data: (units) {
+        final List<_NodeItem> nodes = [];
+        int globalLessonIndex = 0;
+        int firstIncompleteGlobalIndex = -1;
         
-        if (firstIncompleteGlobalIndex == -1 && !progress.isCompleted(lesson.id)) {
-          firstIncompleteGlobalIndex = globalLessonIndex;
+        for (int i = 0; i < units.length; i++) {
+          final unit = units[i];
+          nodes.add(_NodeItem.header(unit, i));
+          
+          for (int j = 0; j < unit.lessons.length; j++) {
+            final lesson = unit.lessons[j];
+            nodes.add(_NodeItem.lesson(lesson, globalLessonIndex, i));
+            
+            if (firstIncompleteGlobalIndex == -1 && !progress.isCompleted(lesson.id)) {
+              firstIncompleteGlobalIndex = globalLessonIndex;
+            }
+            globalLessonIndex++;
+          }
         }
-        globalLessonIndex++;
-      }
-    }
 
-    if (firstIncompleteGlobalIndex == -1) firstIncompleteGlobalIndex = globalLessonIndex;
-    final int currentLessonIndex = firstIncompleteGlobalIndex;
+        if (firstIncompleteGlobalIndex == -1) firstIncompleteGlobalIndex = globalLessonIndex;
+        final int currentLessonIndex = firstIncompleteGlobalIndex;
 
-    return Scaffold(
+        return Scaffold(
+          // ... (existing AppBar and body with ListView.builder)
       appBar: AppBar(
         title: const Text('Lernpfad', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Colors.transparent,
@@ -198,6 +210,8 @@ class UnitsScreen extends ConsumerWidget {
           ),
         ),
       ),
+        );
+      },
     );
   }
 

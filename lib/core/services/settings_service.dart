@@ -31,9 +31,11 @@ class AppSettings {
   final int aiDeckRoutingCount;
   final int? aiTargetDeckId;
   // AI display preferences
+  final String? ollamaLocalUrl;
   final bool showRomajiInChat;
   final bool showHiraganaInChat;
   final bool colorGermanSentences;
+  final String aiExplanationLanguage; // 'de' or 'ja'
   // AI model selection
   final String selectedOllamaModel;
   final String selectedIcon; // 'MainActivityDefault', 'MainActivityManga', 'MainActivityKanji'
@@ -44,6 +46,8 @@ class AppSettings {
   final String openaiApiKey;
   final String anthropicApiKey;
   final String aiModel; // e.g. 'gemini-2.0-flash', 'gpt-4o-mini', 'claude-sonnet-4-5-20250514'
+  final bool showColorGrammar; // Global toggle for AI grammar coloring
+  final bool showFurigana; // Local toggle for showing Hiragana over Kanji
   // SRS settings
   final bool autoAddMangaSrs; // Automatically add manga vocab decks to SRS
   final String srsMode; // 'shared' = one SRS across all methods, 'individual' = per method
@@ -73,6 +77,10 @@ class AppSettings {
     this.showRomajiInChat = true,
     this.showHiraganaInChat = true,
     this.colorGermanSentences = true,
+    this.aiExplanationLanguage = 'de',
+    this.ollamaLocalUrl,
+    this.showFurigana = true,
+    this.showColorGrammar = true,
     this.selectedOllamaModel = 'llama3.2:3b',
     this.selectedIcon = 'MainActivityDefault',
     this.geminiApiKey = '',
@@ -98,7 +106,7 @@ class AppSettings {
     }
   }
   
-  // Legacy compatibility getters
+  String getEffectiveLanguageLevel() => aiLanguageLevel;
   String get appLanguage => motherTongue;
   String get contentLanguage => motherTongue;
 
@@ -133,6 +141,10 @@ class AppSettings {
     bool? showRomajiInChat,
     bool? showHiraganaInChat,
     bool? colorGermanSentences,
+    String? aiExplanationLanguage,
+    String? ollamaLocalUrl,
+    bool? showFurigana,
+    bool? showColorGrammar,
     String? selectedOllamaModel,
     String? selectedIcon,
     String? geminiApiKey,
@@ -168,6 +180,10 @@ class AppSettings {
       showRomajiInChat: showRomajiInChat ?? this.showRomajiInChat,
       showHiraganaInChat: showHiraganaInChat ?? this.showHiraganaInChat,
       colorGermanSentences: colorGermanSentences ?? this.colorGermanSentences,
+      aiExplanationLanguage: aiExplanationLanguage ?? this.aiExplanationLanguage,
+      ollamaLocalUrl: ollamaLocalUrl ?? this.ollamaLocalUrl,
+      showFurigana: showFurigana ?? this.showFurigana,
+      showColorGrammar: showColorGrammar ?? this.showColorGrammar,
       selectedOllamaModel: selectedOllamaModel ?? this.selectedOllamaModel,
       selectedIcon: selectedIcon ?? this.selectedIcon,
       geminiApiKey: geminiApiKey ?? this.geminiApiKey,
@@ -176,7 +192,6 @@ class AppSettings {
       anthropicApiKey: anthropicApiKey ?? this.anthropicApiKey,
       aiModel: aiModel ?? this.aiModel,
       autoAddMangaSrs: autoAddMangaSrs ?? this.autoAddMangaSrs,
-      srsMode: srsMode ?? this.srsMode,
     );
   }
 }
@@ -220,6 +235,9 @@ class SettingsNotifier extends Notifier<AppSettings> {
       showRomajiInChat: prefs.getBool('showRomajiInChat') ?? true,
       showHiraganaInChat: prefs.getBool('showHiraganaInChat') ?? true,
       colorGermanSentences: prefs.getBool('colorGermanSentences') ?? true,
+      aiExplanationLanguage: prefs.getString('aiExplanationLanguage') ?? 'de',
+      ollamaLocalUrl: prefs.getString('ollamaLocalUrl') ?? 'http://localhost:11434',
+      showColorGrammar: prefs.getBool('showColorGrammar') ?? true,
       selectedOllamaModel: prefs.getString('selectedOllamaModel') ?? 'llama3.2:3b',
       selectedIcon: prefs.getString('selectedIcon') ?? 'MainActivityDefault',
       geminiApiKey: prefs.getString('geminiApiKey') ?? '',
@@ -371,22 +389,46 @@ class SettingsNotifier extends Notifier<AppSettings> {
     state = state.copyWith(aiTargetDeckId: deckId);
   }
 
-  Future<void> toggleRomajiInChat(bool value) async {
+  Future<void> toggleShowRomajiInChat(bool value) async {
+    state = state.copyWith(showRomajiInChat: value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('showRomajiInChat', value);
-    state = state.copyWith(showRomajiInChat: value);
   }
 
-  Future<void> toggleHiraganaInChat(bool value) async {
+  Future<void> toggleShowHiraganaInChat(bool value) async {
+    state = state.copyWith(showHiraganaInChat: value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('showHiraganaInChat', value);
-    state = state.copyWith(showHiraganaInChat: value);
   }
 
   Future<void> toggleColorGerman(bool value) async {
+    state = state.copyWith(colorGermanSentences: value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('colorGermanSentences', value);
-    state = state.copyWith(colorGermanSentences: value);
+  }
+
+  Future<void> updateOllamaUrl(String url) async {
+    state = state.copyWith(ollamaLocalUrl: url);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('ollamaLocalUrl', url);
+  }
+
+  Future<void> toggleShowColorGrammar(bool value) async {
+    state = state.copyWith(showColorGrammar: value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('showColorGrammar', value);
+  }
+
+  Future<void> toggleShowFurigana(bool value) async {
+    state = state.copyWith(showFurigana: value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('showFurigana', value);
+  }
+
+  Future<void> updateAiExplanationLanguage(String lang) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('aiExplanationLanguage', lang);
+    state = state.copyWith(aiExplanationLanguage: lang);
   }
 
   Future<void> updateOllamaModel(String model) async {

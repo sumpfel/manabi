@@ -89,19 +89,25 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     ref.listen<ProgressState>(progressProvider, (previous, next) {
-      if (next.isLoaded && (previous == null || !previous.isLoaded)) {
-        ref.read(studyServiceProvider).syncAllReachedUnits(next).then((_) {
-          ref.invalidate(dashboardStatsProvider);
-        });
+      if (next.isLoaded) {
+        bool shouldSync = (previous == null || !previous.isLoaded) || 
+                          (previous.completedLessons.length != next.completedLessons.length);
+        if (shouldSync) {
+          ref.read(studyServiceProvider).syncAllReachedUnits(next).then((_) {
+            ref.invalidate(dashboardStatsProvider);
+            ref.invalidate(decksProvider);
+          });
+        }
       }
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final progress = ref.read(progressProvider);
       final studyService = ref.read(studyServiceProvider);
-      if (progress.isLoaded && !studyService.hasInitiallySynced) {
+      if (progress.isLoaded && !StudyService.hasInitiallySynced) {
         studyService.syncAllReachedUnits(progress).then((_) {
           ref.invalidate(dashboardStatsProvider);
+          ref.invalidate(decksProvider);
         });
       }
     });

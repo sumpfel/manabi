@@ -152,7 +152,10 @@ class _VocabFabs extends ConsumerWidget {
                   createdAt: DateTime.now().millisecondsSinceEpoch,
                   deckType: DeckType.custom,
                 ));
-                if (ctx.mounted) Navigator.pop(ctx);
+                if (ctx.mounted) {
+                  Navigator.pop(ctx);
+                  ref.invalidate(decksProvider);
+                }
               }
             },
             child: const Text('Erstellen'),
@@ -268,18 +271,11 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
   }
 
   Future<void> _createDeckWithAi(AppSettings settings, String theme) async {
-    final lang = settings.motherTongue == 'de' ? 'German' : 'English';
-    final prompt = 'Create a Japanese vocabulary deck about "$theme" at CEFR level ${settings.aiLanguageLevel}. '
-        'Return ONLY a JSON object with: '
-        '"title": deck name, '
-        '"sections": array of section objects OR null if sub-categories don\'t make sense for this topic. '
-        'Each section: {"name": "section name", "words": [vocab array]}. '
-        'If sections is null, put words directly in "words" array at top level. '
-        'Each word object: "kanji" (kanji if applicable, null otherwise), "kana" (hiragana reading), '
-        '"translation_de" ($lang translation), "translation_en" (English translation), '
-        '"example_sentence" (Japanese example), "example_translation" ($lang example translation). '
-        'Generate 15-20 words total. Only use sections if the topic naturally has distinct sub-groups (e.g. "food" → "fruits", "vegetables", "drinks"). '
-        'Return ONLY valid JSON, no markdown.';
+    final motherTongue = settings.motherTongue == 'de' ? 'German' : 'English';
+    final prompt = 'Erstelle ein Japanisch-Lern-Vokabeldeck zum Thema "$theme" (Niveau: ${settings.aiLanguageLevel}). '
+        'ANTWORTE NUR MIT EINEM JSON-OBJEKT im Format: {"vocab": [{"word": "...", "reading": "...", "translation": "$motherTongue", "example": "...", "example_translation": "$motherTongue"}]}. '
+        'REGELN: "word" (Kanji) und "reading" (Kana) MÜSSEN Japanisch sein. BENUTZE UNTER KEINEN UMSTÄNDEN ROMAJI FÜR DIESE FELDER. '
+        'Erzeuge 15-20 Wörter. Nur valides JSON, kein Markdown.';
 
     final text = await _callAiProvider(settings, prompt);
     if (text == null) return;
@@ -295,13 +291,16 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
     final vocabRepo = ref.read(vocabRepositoryProvider);
     int totalCount = 0;
 
-    // Try parsing as structured object first (with optional sections)
+    // Try parsing as structured object first
     if (objMatch != null) {
       try {
-        final obj = jsonDecode(objMatch.group(0)!) as Map<String, dynamic>;
+        String rawJson = objMatch.group(0)!;
+        // Clean up common AI escaping errors
+        rawJson = rawJson.replaceAll(r'\"', '"'); 
+        final obj = jsonDecode(rawJson) as Map<String, dynamic>;
         final deckName = obj['title'] as String? ?? theme;
         final sections = obj['sections'] as List?;
-        final flatWords = obj['words'] as List?;
+        final flatWords = (obj['vocab'] ?? obj['words']) as List?;
 
         final deckId = await vocabRepo.addDeck(Deck(
           name: deckName,
@@ -315,14 +314,14 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
             if (v is! Map) continue;
             await vocabRepo.addVocab(Vocab(
               deckId: targetDeckId,
-              kanji: v['kanji'],
-              kana: v['kana'] ?? '',
-              translation: v['translation_de'] ?? v['translation_en'] ?? '',
-              translationDe: v['translation_de'],
-              translationEn: v['translation_en'],
-              exampleSentence: v['example_sentence'],
-              exampleTranslationDe: v['example_translation'],
-              exampleTranslationEn: v['example_translation'],
+              kanji: v['kanji'] ?? v['word'] ?? v['character'],
+              kana: v['kana'] ?? v['reading'] ?? '',
+              translation: v['meaning_de'] ?? v['translation_de'] ?? v['translation_en'] ?? v['meaning_en'] ?? v['translation'] ?? '',
+              translationDe: v['meaning_de'] ?? v['translation_de'],
+              translationEn: v['meaning_en'] ?? v['translation_en'],
+              exampleSentence: v['example_sentence'] ?? v['example'],
+              exampleTranslationDe: v['example_translation_de'] ?? v['example_translation'],
+              exampleTranslationEn: v['example_translation_en'] ?? v['example_translation'],
               dueDate: DateTime.now().millisecondsSinceEpoch,
             ));
             totalCount++;
@@ -334,16 +333,18 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
           for (final section in sections) {
             if (section is! Map) continue;
             final sectionName = section['name'] as String? ?? 'Sektion';
-            final sectionWords = section['words'] as List? ?? [];
+            final sectionWords = (section['words'] ?? section['vocab']) as List? ?? [];
             final subDeckId = await vocabRepo.getOrCreateSubDeck(deckId, sectionName, DeckType.aiChat);
             await addWords(sectionWords, subDeckId);
           }
-        } else if (flatWords != null) {
-          await addWords(flatWords, deckId);
+        } else {
+          // Fallback to flatWords if sections is null
+          await addWords(flatWords ?? [], deckId);
         }
 
         if (mounted) {
           Navigator.pop(context);
+          ref.invalidate(decksProvider);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Deck "$deckName" mit $totalCount Vokabeln erstellt!'), backgroundColor: Colors.green),
           );
@@ -355,7 +356,9 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
     }
 
     // Fallback: parse as flat array
-    final vocabList = jsonDecode(arrMatch!.group(0)!) as List;
+    String rawArr = arrMatch!.group(0)!;
+    rawArr = rawArr.replaceAll(r'\"', '"');
+    final vocabList = jsonDecode(rawArr) as List;
 
     final deckId = await vocabRepo.addDeck(Deck(
       name: theme,
@@ -368,20 +371,21 @@ class _CreateDeckSheetState extends ConsumerState<_CreateDeckSheet> {
       if (v is! Map) continue;
       await vocabRepo.addVocab(Vocab(
         deckId: deckId,
-        kanji: v['kanji'],
-        kana: v['kana'] ?? '',
-        translation: v['translation_de'] ?? v['translation_en'] ?? '',
-        translationDe: v['translation_de'],
-        translationEn: v['translation_en'],
-        exampleSentence: v['example_sentence'],
-        exampleTranslationDe: v['example_translation'],
-        exampleTranslationEn: v['example_translation'],
+        kanji: v['kanji'] ?? v['word'],
+        kana: v['kana'] ?? v['reading'] ?? '',
+        translation: v['translation_de'] ?? v['meaning_de'] ?? v['translation_en'] ?? v['meaning_en'] ?? v['translation'] ?? '',
+        translationDe: v['translation_de'] ?? v['meaning_de'],
+        translationEn: v['translation_en'] ?? v['meaning_en'],
+        exampleSentence: v['example_sentence'] ?? v['example'],
+        exampleTranslationDe: v['example_translation_de'] ?? v['example_translation'],
+        exampleTranslationEn: v['example_translation_en'] ?? v['example_translation'],
         dueDate: DateTime.now().millisecondsSinceEpoch,
       ));
     }
 
     if (mounted) {
       Navigator.pop(context);
+      ref.invalidate(decksProvider);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Deck "$theme" mit ${vocabList.length} Vokabeln erstellt!'), backgroundColor: Colors.green),
       );
@@ -660,8 +664,9 @@ class _CommunityDecksBrowserState extends ConsumerState<_CommunityDecksBrowser> 
         } else {
           prompt = 'Generate a list of common JLPT $level vocabulary words. Return ONLY a JSON array of objects with: '
               '"kanji" (kanji if applicable, null otherwise), "kana" (hiragana reading), '
-              '"translation_de" ($lang translation), "translation_en" (English translation), '
-              '"example_sentence" (Japanese example), "example_translation" ($lang example translation). '
+              '"meaning_de" ($lang translation), "meaning_en" (English translation), '
+              '"example_sentence" (Japanese example), "example_translation_de" ($lang example translation), '
+              '"example_translation_en" (English example translation). '
               'Generate 30 words ordered by frequency. Return ONLY valid JSON, no markdown.';
         }
 
@@ -702,14 +707,14 @@ class _CommunityDecksBrowserState extends ConsumerState<_CommunityDecksBrowser> 
           } else {
             await vocabRepo.addVocab(Vocab(
               deckId: deckId,
-              kanji: item['kanji'],
-              kana: item['kana'] ?? '',
-              translation: item['translation_de'] ?? item['translation_en'] ?? '',
-              translationDe: item['translation_de'],
-              translationEn: item['translation_en'],
-              exampleSentence: item['example_sentence'],
-              exampleTranslationDe: item['example_translation'],
-              exampleTranslationEn: item['example_translation'],
+              kanji: item['kanji'] ?? item['word'] ?? item['character'],
+              kana: item['kana'] ?? item['reading'] ?? '',
+              translation: item['meaning_de'] ?? item['translation_de'] ?? item['translation_en'] ?? item['meaning_en'] ?? item['translation'] ?? '',
+              translationDe: item['meaning_de'] ?? item['translation_de'],
+              translationEn: item['meaning_en'] ?? item['translation_en'],
+              exampleSentence: item['example_sentence'] ?? item['example'],
+              exampleTranslationDe: item['example_translation_de'] ?? item['example_translation'],
+              exampleTranslationEn: item['example_translation_en'] ?? item['example_translation'],
               dueDate: DateTime.now().millisecondsSinceEpoch,
             ));
           }
@@ -739,9 +744,32 @@ class _CommunityDecksBrowserState extends ConsumerState<_CommunityDecksBrowser> 
           Uri.parse('${settings.effectiveBackendUrl}/api/community/clone/${deck['id']}'),
           headers: {'Authorization': 'Bearer $token'},
         ).timeout(const Duration(seconds: 30));
+        
         if (res.statusCode == 200 && context.mounted) {
+          final data = jsonDecode(res.body);
+          final clonedDeckData = data['deck'];
+          final clonedVocabList = data['vocab'] as List;
+          
+          final localDeckId = await vocabRepo.addDeck(Deck(
+            name: clonedDeckData['name'],
+            description: clonedDeckData['description'] ?? '',
+            createdAt: DateTime.now().millisecondsSinceEpoch,
+            deckType: DeckType.custom,
+          ));
+          
+          for (final v in clonedVocabList) {
+            await vocabRepo.addVocab(Vocab(
+              deckId: localDeckId,
+              kanji: v['word_text'],
+              kana: v['reading_text'] ?? '',
+              translation: v['translation'] ?? '',
+              dueDate: DateTime.now().millisecondsSinceEpoch,
+            ));
+          }
+          
+          ref.invalidate(decksProvider);
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('"${deck['name']}" geklont!'), backgroundColor: Colors.green),
+            SnackBar(content: Text('"${deck['name']}" lokal gespeichert!'), backgroundColor: Colors.green),
           );
         }
       } catch (e) {

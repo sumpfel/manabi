@@ -27,7 +27,7 @@ class VocabScreen extends ConsumerStatefulWidget {
 class _VocabScreenState extends ConsumerState<VocabScreen> {
   String _selectedFilter = 'All';
 
-  void _refresh() => setState(() {});
+  void _refresh() => ref.invalidate(decksProvider);
 
   @override
   void initState() {
@@ -41,93 +41,92 @@ class _VocabScreenState extends ConsumerState<VocabScreen> {
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(initialSyncCompleteProvider);
+    final decksAsync = ref.watch(decksProvider);
     final vocabRepo = ref.watch(vocabRepositoryProvider);
     final s = AppStrings(ref.watch(settingsProvider).appLanguage);
 
     return Scaffold(
-        body: FutureBuilder<List<Deck>>(
-          future: vocabRepo.getDecks(),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            } else if (snapshot.hasError) {
-              return Center(child: Text('Error: ${snapshot.error}'));
-            } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
-              return const Center(child: Text('Keine Decks gefunden. Erstelle eines!'));
-            }
+        body: RefreshIndicator(
+          onRefresh: () async => ref.invalidate(decksProvider),
+          child: decksAsync.when(
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (err, stack) => Center(child: Text('Error: $err')),
+            data: (allDecks) {
+              if (allDecks.isEmpty) {
+                return const Center(child: Text('Keine Decks gefunden. Erstelle eines!'));
+              }
 
-            final allDecks = snapshot.data!;
-            final progress = ref.watch(progressProvider);
-            final visibleDecks = allDecks.where((d) {
-              // Hide ALL kanji-type decks from vocab screen (they belong in Schreiben > Kanji)
-              if (d.deckType == DeckType.kanji) return false;
-              // Hide sub-decks from top-level list
-              if (d.parentDeckId != null) return false;
-              // Hide locked unit decks
-              if (d.deckType == DeckType.unit && d.parentUnitId != null) {
-                final units = CourseData.units;
-                final unitIndex = units.indexWhere((u) => u.id == d.parentUnitId);
-                if (unitIndex < 0) return false;
-                // Unit 0 always visible; others need previous unit completed
-                if (unitIndex > 0) {
-                  final prevUnit = units[unitIndex - 1];
-                  if (prevUnit.lessons.isNotEmpty && !progress.isCompleted(prevUnit.lessons.last.id)) {
-                    return false;
+              final progress = ref.watch(progressProvider);
+              final visibleDecks = allDecks.where((d) {
+                // Hide ALL kanji-type decks from vocab screen (they belong in Schreiben > Kanji)
+                if (d.deckType == DeckType.kanji) return false;
+                // We'll handle hierarchy in the list builder
+                // if (d.parentDeckId != null) return false;
+                // Hide locked unit decks
+                if (d.deckType == DeckType.unit && d.parentUnitId != null) {
+                  final units = CourseData.units;
+                  final unitIndex = units.indexWhere((u) => u.id == d.parentUnitId);
+                  if (unitIndex < 0) return false;
+                  // Unit 0 always visible; others need previous unit completed
+                  if (unitIndex > 0) {
+                    final prevUnit = units[unitIndex - 1];
+                    if (prevUnit.lessons.isNotEmpty && !progress.isCompleted(prevUnit.lessons.last.id)) {
+                      return false;
+                    }
                   }
+                  return true;
                 }
                 return true;
-              }
-              return true;
-            }).toList();
-            
-            final categories = visibleDecks
-                .map((d) => d.category)
-                .where((c) => c != null && c.trim().isNotEmpty)
-                .map((c) => c!)
-                .toSet()
-                .toList()..sort();
+              }).toList();
+              
+              final categories = visibleDecks
+                  .map((d) => d.category)
+                  .where((c) => c != null && c.trim().isNotEmpty)
+                  .map((c) => c!)
+                  .toSet()
+                  .toList()..sort();
 
-            final filteredDecks = visibleDecks.where((d) {
-              if (_selectedFilter == 'All') return true;
-              if (_selectedFilter == 'Unit') return d.deckType == DeckType.unit;
-              if (_selectedFilter == 'AI') return d.deckType == DeckType.aiChat;
-              if (_selectedFilter == 'Custom') return d.deckType == DeckType.custom;
-              if (_selectedFilter == 'Manga') return d.deckType == DeckType.manga;
-              return d.category == _selectedFilter;
-            }).toList();
+              final filteredDecks = visibleDecks.where((d) {
+                if (_selectedFilter == 'All') return true;
+                if (_selectedFilter == 'Unit') return d.deckType == DeckType.unit;
+                if (_selectedFilter == 'AI') return d.deckType == DeckType.aiChat;
+                if (_selectedFilter == 'Custom') return d.deckType == DeckType.custom;
+                if (_selectedFilter == 'Manga') return d.deckType == DeckType.manga;
+                return d.category == _selectedFilter;
+              }).toList();
 
-            return Column(
-              children: [
-                const SizedBox(height: 8),
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  child: Row(
-                    children: [
-                      _buildFilterChip('All', s.all),
-                      const SizedBox(width: 8),
-                      _buildFilterChip('Unit', s.units),
-                      const SizedBox(width: 8),
-                      _buildFilterChip('AI', s.ai),
-                      const SizedBox(width: 8),
-                      _buildFilterChip('Custom', s.custom),
-                      const SizedBox(width: 8),
-                      _buildFilterChip('Manga', s.manga),
-                      for (var cat in categories) ...[
+              return Column(
+                children: [
+                  const SizedBox(height: 8),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Row(
+                      children: [
+                        _buildFilterChip('All', s.all),
                         const SizedBox(width: 8),
-                        _buildFilterChip(cat, cat),
+                        _buildFilterChip('Unit', s.units),
+                        const SizedBox(width: 8),
+                        _buildFilterChip('AI', s.ai),
+                        const SizedBox(width: 8),
+                        _buildFilterChip('Custom', s.custom),
+                        const SizedBox(width: 8),
+                        _buildFilterChip('Manga', s.manga),
+                        for (var cat in categories) ...[
+                          const SizedBox(width: 8),
+                          _buildFilterChip(cat, cat),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Expanded(
-                  child: _buildDeckList(context, vocabRepo, filteredDecks),
-                ),
-              ],
-            );
-          },
+                  const SizedBox(height: 4),
+                  Expanded(
+                    child: _buildDeckList(context, vocabRepo, filteredDecks),
+                  ),
+                ],
+              );
+            },
+          ),
         ),
         // FAB handled by parent DecksScreen
     );
@@ -136,10 +135,12 @@ class _VocabScreenState extends ConsumerState<VocabScreen> {
   void _showDeckActions(BuildContext context, VocabRepository vocabRepo, Deck deck) {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true, // Allow it to expand to fit content
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
             Padding(
               padding: const EdgeInsets.all(16),
               child: Text(deck.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -265,7 +266,7 @@ class _VocabScreenState extends ConsumerState<VocabScreen> {
                 },
               ),
             ],
-            if (deck.deckType != DeckType.unit) // Can't delete unit decks
+            if (deck.deckType != DeckType.unit)
               ListTile(
                 leading: const Icon(Icons.delete, color: Colors.red),
                 title: const Text('Deck löschen', style: TextStyle(color: Colors.red)),
@@ -296,7 +297,8 @@ class _VocabScreenState extends ConsumerState<VocabScreen> {
                   }
                 },
               ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -383,177 +385,199 @@ class _VocabScreenState extends ConsumerState<VocabScreen> {
         ),
       );
     }
+
     return GridView.builder(
       padding: const EdgeInsets.all(16),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 220,
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
         crossAxisSpacing: 16,
         mainAxisSpacing: 16,
-        childAspectRatio: 0.75,
+        childAspectRatio: 0.9,
       ),
       itemCount: decks.length,
       itemBuilder: (context, index) {
         final deck = decks[index];
-        
-        Color gradientStart, gradientEnd;
-        IconData deckIcon;
-        switch (deck.deckType) {
-          case DeckType.unit:
-            final unitColor = _unitColors[index % _unitColors.length];
-            gradientStart = unitColor.shade400;
-            gradientEnd = unitColor.shade700;
-            deckIcon = Icons.school;
-            break;
-          case DeckType.manga:
-            gradientStart = Colors.orange.shade400;
-            gradientEnd = Colors.deepOrange.shade600;
-            deckIcon = Icons.photo_library;
-            break;
-          case DeckType.custom:
-            gradientStart = Colors.purple.shade400;
-            gradientEnd = Colors.deepPurple.shade700;
-            deckIcon = Icons.library_books;
-            break;
-          case DeckType.kanji:
-            gradientStart = Colors.teal.shade400;
-            gradientEnd = Colors.teal.shade700;
-            deckIcon = Icons.translate;
-            break;
-          case DeckType.aiChat:
-            gradientStart = Colors.indigo.shade400;
-            gradientEnd = Colors.blue.shade900;
-            deckIcon = Icons.auto_awesome;
-            break;
-        }
+        return _buildDeckCard(context, vocabRepo, deck, isSubDeck: deck.parentDeckId != null);
+      },
+    );
+  }
 
-        return GestureDetector(
-          onTap: () => _showStudyMethodSheet(context, vocabRepo, deck),
-          onLongPress: () => _showDeckActions(context, vocabRepo, deck),
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              boxShadow: const [
-                BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 4)),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(24),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  // Background: thumbnail or gradient
-                  if (deck.thumbnailPath != null && File(deck.thumbnailPath!).existsSync())
-                    Image.file(File(deck.thumbnailPath!), fit: BoxFit.cover)
-                  else
+  Widget _buildSectionDivider(String parentName) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+      child: Row(
+        children: [
+          const Icon(Icons.subdirectory_arrow_right, size: 14, color: Colors.amber),
+          const SizedBox(width: 8),
+          Text(
+            'SEKTIONEN VON "${parentName.toUpperCase()}"',
+            style: const TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(child: Divider(color: Colors.white10, thickness: 1)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeckCard(BuildContext context, VocabRepository vocabRepo, Deck deck, {bool isSubDeck = false}) {
+    Color gradientStart, gradientEnd;
+    IconData deckIcon;
+    switch (deck.deckType) {
+      case DeckType.unit:
+        final unitColor = _unitColors[deck.id != null ? deck.id! % _unitColors.length : 0];
+        gradientStart = unitColor.shade400;
+        gradientEnd = unitColor.shade700;
+        deckIcon = Icons.school;
+        break;
+      case DeckType.manga:
+        gradientStart = Colors.orange.shade400;
+        gradientEnd = Colors.deepOrange.shade600;
+        deckIcon = Icons.photo_library;
+        break;
+      case DeckType.custom:
+        gradientStart = Colors.purple.shade400;
+        gradientEnd = Colors.deepPurple.shade700;
+        deckIcon = Icons.library_books;
+        break;
+      case DeckType.kanji:
+        gradientStart = Colors.teal.shade400;
+        gradientEnd = Colors.teal.shade700;
+        deckIcon = Icons.translate;
+        break;
+      case DeckType.aiChat:
+        gradientStart = Colors.indigo.shade400;
+        gradientEnd = Colors.blue.shade900;
+        deckIcon = Icons.auto_awesome;
+        break;
+    }
+
+    return GestureDetector(
+      onTap: () => _showStudyMethodSheet(context, vocabRepo, deck),
+      onLongPress: () => _showDeckActions(context, vocabRepo, deck),
+      child: Container(
+        height: isSubDeck ? null : 160,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(isSubDeck ? 16 : 24),
+          boxShadow: const [
+            BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 4)),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(isSubDeck ? 16 : 24),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // Background: thumbnail or gradient
+              if (deck.thumbnailPath != null && File(deck.thumbnailPath!).existsSync())
+                Image.file(File(deck.thumbnailPath!), fit: BoxFit.cover)
+              else
+                Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [isSubDeck ? gradientStart.withOpacity(0.4) : gradientStart, isSubDeck ? gradientEnd.withOpacity(0.4) : gradientEnd],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    border: isSubDeck ? Border.all(color: gradientStart.withOpacity(0.3), width: 1) : null,
+                  ),
+                ),
+              // Dark overlay for text readability
+              Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.transparent, Colors.black.withAlpha(isSubDeck ? 150 : 180)],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
+                ),
+              ),
+              // Content
+              Padding(
+                padding: EdgeInsets.all(isSubDeck ? 12.0 : 16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
                     Container(
+                      padding: EdgeInsets.all(isSubDeck ? 6 : 10),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withAlpha(isSubDeck ? 30 : 50),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(deckIcon, color: Colors.white, size: isSubDeck ? 18 : 28),
+                    ),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            deck.name,
+                            style: TextStyle(color: Colors.white, fontSize: isSubDeck ? 14 : 18, fontWeight: FontWeight.bold, height: 1.2),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (!isSubDeck && deck.description != null && deck.description!.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              deck.description!,
+                              style: TextStyle(color: Colors.white.withAlpha(200), fontSize: 12),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // Progress bar (positioned at bottom)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: FutureBuilder<List<DeckSession>>(
+                  future: ref.read(deckSessionServiceProvider).getSessionsForDeck(deck.id!),
+                  builder: (context, sessionSnapshot) {
+                    if (!sessionSnapshot.hasData || sessionSnapshot.data!.isEmpty) {
+                      return const SizedBox.shrink();
+                    }
+                    // Show the latest session's progress
+                    final latest = sessionSnapshot.data!.first;
+                    final total = latest.correctCount + latest.wrongCount;
+                    return Container(
+                      padding: EdgeInsets.symmetric(horizontal: isSubDeck ? 8 : 12, vertical: 4),
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
-                          colors: [gradientStart, gradientEnd],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
+                          colors: [Colors.black.withAlpha(200), Colors.black.withAlpha(150)],
+                          begin: Alignment.bottomCenter,
+                          end: Alignment.topCenter,
                         ),
                       ),
-                    ),
-                  // Dark overlay for text readability
-                  Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [Colors.transparent, Colors.black.withAlpha(180)],
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                      ),
-                    ),
-                  ),
-                  // Content
-                  Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withAlpha(50),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(deckIcon, color: Colors.white, size: 28),
-                        ),
-                        Flexible(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                deck.name,
-                                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, height: 1.2),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              if (deck.description != null && deck.description!.isNotEmpty) ...[
-                                const SizedBox(height: 4),
-                                Text(
-                                  deck.description!,
-                                  style: TextStyle(color: Colors.white.withAlpha(200), fontSize: 12),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  // Progress bar
-                  FutureBuilder<List<DeckSession>>(
-                    future: ref.read(deckSessionServiceProvider).getSessionsForDeck(deck.id!),
-                    builder: (context, sessionSnapshot) {
-                      if (!sessionSnapshot.hasData || sessionSnapshot.data!.isEmpty) {
-                        return const SizedBox.shrink();
-                      }
-                      // Show the latest session's progress
-                      final latest = sessionSnapshot.data!.first;
-                      final total = latest.correctCount + latest.wrongCount;
-                      return Positioned(
-                        left: 0, right: 0, bottom: 0,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withAlpha(150),
-                            borderRadius: const BorderRadius.only(
-                              bottomLeft: Radius.circular(24),
-                              bottomRight: Radius.circular(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: LinearProgressIndicator(
+                              value: latest.correctCount / (total > 0 ? total : 1),
+                              backgroundColor: Colors.white24,
+                              color: Colors.greenAccent,
+                              minHeight: 2,
                             ),
                           ),
-                          child: Column(
-                            children: [
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(4),
-                                child: LinearProgressIndicator(
-                                  value: latest.progressPercent,
-                                  backgroundColor: Colors.white24,
-                                  color: latest.isCompleted ? Colors.green : Colors.blue,
-                                  minHeight: 4,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                total > 0 ? '${latest.correctCount}✓ ${latest.wrongCount}✗' : '',
-                                style: TextStyle(color: Colors.white.withAlpha(180), fontSize: 10),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ],
+                        ],
+                      ),
+                    );
+                  },
+                ),
               ),
-            ),
+            ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }

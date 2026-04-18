@@ -43,9 +43,9 @@ const _unitKanjiData = <String, List<Map<String, String>>>{
 class StudyService {
   final VocabRepository _vocabRepo;
   final ProviderRef _ref;
-  final _syncLock = <String>{};
-  bool hasInitiallySynced = false;
-  bool _isSyncing = false;
+  static final _syncLock = <String>{};
+  static bool hasInitiallySynced = false;
+  static bool _isSyncing = false;
 
   StudyService(this._vocabRepo, this._ref);
 
@@ -55,29 +55,29 @@ class StudyService {
     try {
       hasInitiallySynced = true;
       final units = CourseData.units;
-    for (int ui = 0; ui < units.length; ui++) {
-      final unit = units[ui];
+      for (int ui = 0; ui < units.length; ui++) {
+        final unit = units[ui];
 
-      if (ui > 0) {
-        final prevUnit = units[ui - 1];
-        if (prevUnit.lessons.isNotEmpty && !progress.isCompleted(prevUnit.lessons.last.id)) {
-          continue;
+        if (ui > 0) {
+          final prevUnit = units[ui - 1];
+          if (prevUnit.lessons.isNotEmpty && !progress.isCompleted(prevUnit.lessons.last.id)) {
+            continue;
+          }
         }
-      }
 
-      int unitMaxUnlocked = -1;
-      for (int j = 0; j < unit.lessons.length; j++) {
-         bool lessonUnlocked = true;
-         for (int k = 0; k < j; k++) {
-           if (!progress.isCompleted(unit.lessons[k].id)) {
-             lessonUnlocked = false;
-             break;
+        int unitMaxUnlocked = -1;
+        for (int j = 0; j < unit.lessons.length; j++) {
+           bool lessonUnlocked = true;
+           for (int k = 0; k < j; k++) {
+             if (!progress.isCompleted(unit.lessons[k].id)) {
+               lessonUnlocked = false;
+               break;
+             }
            }
-         }
-         if (lessonUnlocked) unitMaxUnlocked = j;
+           if (lessonUnlocked) unitMaxUnlocked = j;
+        }
+        await syncUnitVocab(unit, unitMaxUnlocked);
       }
-      await syncUnitVocab(unit, unitMaxUnlocked);
-    }
     } finally {
       _isSyncing = false;
       _ref.read(initialSyncCompleteProvider.notifier).state = true;

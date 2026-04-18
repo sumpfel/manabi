@@ -5,6 +5,10 @@ import 'settings_service.dart';
 
 final aiServiceProvider = Provider<AiService>((ref) => AiService(ref));
 
+final ollamaModelsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+  return ref.watch(aiServiceProvider).fetchOllamaModels();
+});
+
 class AiService {
   final Ref _ref;
   AiService(this._ref);
@@ -27,7 +31,11 @@ class AiService {
     try {
       if (provider == 'ollama') {
         if (!settings.hasBackend) {
-          throw Exception('Für Ollama muss in den Entwickler-Einstellungen eine Backend-IP konfiguriert sein.');
+          // If no backend, try direct local connection
+          if (settings.ollamaLocalUrl != null && settings.ollamaLocalUrl!.isNotEmpty) {
+            return await _callOllamaDirect(settings, prompt, systemPrompt, history);
+          }
+          throw Exception('Für Ollama muss entweder ein Backend oder eine lokale Ollama-URL konfiguriert sein.');
         }
         return await _callOllama(settings, prompt, systemPrompt, history);
       } else if (provider == 'openai' && settings.hasOpenaiKey) {
@@ -260,6 +268,80 @@ class AiService {
 
     final errorMsg = _parseError(res.body, 'Ollama');
     throw Exception('Ollama Fehler ${res.statusCode}: $errorMsg');
+  }
+
+  Future<String> _callOllamaDirect(
+    AppSettings settings,
+    String prompt,
+    String? systemPrompt,
+    List<Map<String, String>>? history,
+  ) async {
+    final url = '${settings.ollamaLocalUrl}/api/chat';
+    
+    final messages = <Map<String, String>>[];
+    if (systemPrompt != null) {
+      messages.add({'role': 'system', 'content': systemPrompt});
+    }
+    if (history != null) {
+      messages.addAll(history);
+    }
+    messages.add({'role': 'user', 'content': prompt});
+
+    final res = await http.post(
+      Uri.parse(url),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'model': settings.selectedOllamaModel,
+        'messages': messages,
+        'stream': false,
+      }),
+    ).timeout(const Duration(seconds: 120));
+
+    if (res.statusCode == 200) {
+      final data = jsonDecode(res.body);
+      return data['message']?['content'] ?? 'Keine Antwort von Ollama.';
+    }
+
+    final errorMsg = _parseError(res.body, 'Ollama Local');
+    throw Exception('Lokaler Ollama Fehler ${res.statusCode}: $errorMsg');
+  }
+
+  Future<List<Map<String, dynamic>>> fetchOllamaModels() async {
+    final settings = _ref.read(settingsProvider);
+    
+    // Try local first if available
+    if (settings.ollamaLocalUrl != null && settings.ollamaLocalUrl!.isNotEmpty) {
+      try {
+        final localRes = await http.get(Uri.parse('${settings.ollamaLocalUrl}/api/tags')).timeout(const Duration(seconds: 5));
+        if (localRes.statusCode == 200) {
+          final data = jsonDecode(localRes.body);
+          final List<dynamic> models = data['models'] ?? [];
+          return models.map((m) => {
+            'name': m['name'],
+            'size_gb': (m['size'] ?? 0) / 1e9,
+            'quality': _categorizeModel(m['name'], (m['size'] ?? 0) / 1e9),
+          }).toList();
+        }
+      } catch (_) {}
+    }
+
+    if (!settings.hasBackend) return [];
+    
+    final url = '${settings.effectiveBackendUrl}/api/ai/models';
+    try {
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final List<dynamic> data = jsonDecode(res.body);
+        return data.cast<Map<String, dynamic>>();
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  String _categorizeModel(String name, double sizeGb) {
+    if (name.contains('70b') || name.contains('34b') || sizeGb > 20) return 'slow';
+    if (name.contains('1b') || name.contains('3b') || (sizeGb > 0 && sizeGb < 5)) return 'fast';
+    return 'balanced';
   }
 
   String _parseError(String body, String provider) {

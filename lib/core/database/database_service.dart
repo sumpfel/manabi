@@ -21,7 +21,7 @@ class DatabaseService {
 
     final db = await openDatabase(
       path,
-      version: 14, // V14: AI message versioning
+      version: 15, // V15: Local Units & Lessons
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
     );
@@ -33,6 +33,9 @@ class DatabaseService {
     }
     if (!columns.contains('is_srs_enabled')) {
       await _safeAddColumn(db, 'decks', 'is_srs_enabled', 'INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!columns.contains('is_ai_generated')) {
+      await _safeAddColumn(db, 'decks', 'is_ai_generated', 'INTEGER NOT NULL DEFAULT 0');
     }
 
     return db;
@@ -162,6 +165,30 @@ class DatabaseService {
     if (oldVersion < 14) {
       await _safeAddColumn(db, 'ai_messages', 'parent_message_id', 'INTEGER');
     }
+    if (oldVersion < 15) {
+      await db.execute('''
+      CREATE TABLE IF NOT EXISTS units (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+      ''');
+      await db.execute('''
+      CREATE TABLE IF NOT EXISTS lessons (
+        id TEXT PRIMARY KEY,
+        unit_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        lesson_type TEXT NOT NULL,
+        grammar_explanation TEXT,
+        required_accuracy REAL,
+        exercises_json TEXT NOT NULL,
+        vocab_json TEXT NOT NULL,
+        FOREIGN KEY (unit_id) REFERENCES units (id) ON DELETE CASCADE
+      )
+      ''');
+    }
     // Clean up Default Deck (legacy)
     await db.delete('decks', where: 'name = ? AND deck_type IS NULL', whereArgs: ['Default Deck']);
     await db.delete('decks', where: 'name = ? AND deck_type = ?', whereArgs: ['Default Deck', 'custom']);
@@ -188,7 +215,8 @@ class DatabaseService {
       section $nullableTextType,
       category $nullableTextType,
       is_official INTEGER NOT NULL DEFAULT 0,
-      download_count INTEGER NOT NULL DEFAULT 0
+      download_count INTEGER NOT NULL DEFAULT 0,
+      is_ai_generated INTEGER NOT NULL DEFAULT 0
     )
     ''');
 
@@ -290,6 +318,30 @@ class DatabaseService {
       created_at INTEGER NOT NULL,
       parent_message_id INTEGER,
       FOREIGN KEY (conversation_id) REFERENCES ai_conversations (id) ON DELETE CASCADE
+    )
+    ''');
+
+    await db.execute('''
+    CREATE TABLE units (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+    ''');
+    
+    await db.execute('''
+    CREATE TABLE lessons (
+      id TEXT PRIMARY KEY,
+      unit_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      lesson_type TEXT NOT NULL,
+      grammar_explanation TEXT,
+      required_accuracy REAL,
+      exercises_json TEXT NOT NULL,
+      vocab_json TEXT NOT NULL,
+      FOREIGN KEY (unit_id) REFERENCES units (id) ON DELETE CASCADE
     )
     ''');
   }

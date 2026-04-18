@@ -7,11 +7,21 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
+import 'package:manabi/features/vocab/widgets/vocab_table_view.dart';
+import 'package:manabi/core/database/vocab_repository.dart';
+import 'package:manabi/core/models/deck.dart';
+import 'package:flutter/services.dart';
 import '../../core/services/settings_service.dart';
 import '../../core/services/ai_service.dart';
 import '../../core/i18n/app_strings.dart';
 import '../../core/database/ai_repository.dart';
+import '../../core/database/database_service.dart';
 import 'ai_settings_screen.dart';
+import '../../core/database/unit_repository.dart';
+import '../../core/models/unit.dart';
+import '../../core/models/lesson.dart';
+import '../../core/models/vocab.dart';
+import '../units/units_screen.dart';
 
 // ── Data Models ──
 
@@ -37,6 +47,8 @@ class ChatMessage {
     this.totalVersions = 1,
     this.allVersionContents = const [],
   });
+
+  String get role => isUser ? 'user' : 'assistant';
 
   bool get hasVersions => totalVersions > 1;
 
@@ -124,21 +136,20 @@ class AiChatNotifier extends StateNotifier<List<ChatMessage>> {
 
     try {
       final settings = _ref.read(settingsProvider);
-      final responseText = await _callAi(settings, text);
+      final responseTextRaw = await _callAi(settings, text);
       
-      final botMsg = ChatMessage(content: responseText, isUser: false, timestamp: DateTime.now());
+      final botMsg = ChatMessage(content: responseTextRaw, isUser: false, timestamp: DateTime.now());
       final botMsgId = await _ref.read(aiRepositoryProvider).addMessage(currentConvoId, botMsg);
       state = [...state, ChatMessage(id: botMsgId, content: botMsg.content, isUser: false, timestamp: botMsg.timestamp)];
       
       await _ref.read(aiRepositoryProvider).updateConversationTime(currentConvoId);
       _ref.read(conversationsProvider.notifier).loadConversations();
       
-      // Auto-generate a short conversation title after the first exchange
       if (isFirstMessage) {
         _generateConversationTitle(currentConvoId, text);
       }
     } catch (e) {
-      state = [...state, ChatMessage(content: 'Verbindungsfehler: $e', isUser: false, timestamp: DateTime.now())];
+      state = [...state, ChatMessage(content: 'Error: $e', isUser: false, timestamp: DateTime.now())];
     } finally {
       _ref.read(aiLoadingProvider.notifier).state = false;
     }
@@ -161,13 +172,44 @@ class AiChatNotifier extends StateNotifier<List<ChatMessage>> {
   }
 
   String _buildSystemPrompt(AppSettings settings) {
-    return 'You are a Japanese language tutor. The student speaks ${settings.motherTongue == "de" ? "German" : "English"}. '
-        'Teach at CEFR level ${settings.aiLanguageLevel}. '
-        'Use color tags for grammar: <color=${settings.colorParticles}>particles</color>, '
-        '<color=${settings.colorVerbs}>verbs</color>, <color=${settings.colorNouns}>nouns</color>, '
-        '<color=${settings.colorAdjectives}>adjectives</color>, <color=${settings.colorAdverbs}>adverbs</color>. '
-        '${settings.showRomajiInChat ? "Include romaji readings." : ""} '
-        '${settings.showHiraganaInChat ? "Include hiragana readings above kanji." : ""}';
+    final languageLevel = settings.getEffectiveLanguageLevel();
+    final explanationLangId = settings.aiExplanationLanguage ?? settings.motherTongue;
+    final explanationLang = explanationLangId == 'ja' ? 'Japanisch' : 'Deutsch';
+    
+    final colorInstruction = settings.showColorGrammar
+      ? '''FARB-FORMATIERUNGSREGELN:
+Wende diese Farben auf ALLE japanischen Wörter an, basierend auf ihrer Rolle. Färbe KEINE deutschen Sätze ein.
+- Partikel (は, を, に, の, が...): <color=#4FC3F7>Japanisch</color>
+- Verben (alle Formen): <color=#FF8A65>Japanisch</color>
+- Nomen: <color=#81C784>Japanisch</color>
+- Adjektive: <color=#CE93D8>Japanisch</color>
+- Adverbien: <color=#FFD54F>Japanisch</color>'''
+      : 'Nutze KEINE <color> Tags.';
+
+    final romajiInstruction = settings.showRomajiInChat
+      ? 'Füge Romaji-Lesungen in Klammern nach japanischen Begriffen ein, falls hilfreich.'
+      : 'Nutze KEIN Romaji. Nutze NUR Kanji und Kana für japanische Begriffe.';
+
+    final furiganaInstruction = settings.showHiraganaInChat
+      ? 'Füge Hiragana-Lesungen direkt nach Kanji ein. Format: 漢字<furigana:かんじ/> (innerhalb der Color-Tags).'
+      : '';
+
+    return '''Du bist ein erfahrener Japanisch-Tutor. Nimm jede Frage als die eines Schülers auf.
+Sprachbereich: $languageLevel. Erkläre ausführlich auf $explanationLang.
+
+FORMATIERUNGS-REGELN:
+1. Nutze Markdown (Überschriften, Listen) für Übersichtlichkeit.
+2. IMMER japanische Schrift (Kanji/Kana) für japanische Begriffe nutzen.
+3. $romajiInstruction
+4. $furiganaInstruction
+5. $colorInstruction
+
+STRENGES ANTWORT-FORMAT FÜR BEISPIELE:
+# [Thema]
+## [Beispiel]
+- JP: <Japanischer Satz mit Farben>
+- DE: <Deutsche Übersetzung ohne Farben>
+<Erklärung auf $explanationLang>''';
   }
 
   /// Call the active AI provider (Gemini, OpenAI, or Anthropic).
@@ -272,31 +314,84 @@ class AiChatNotifier extends StateNotifier<List<ChatMessage>> {
 // ── Color tag parser (Markdown Integration) ──
 
 class ColorTagSyntax extends md.InlineSyntax {
-  ColorTagSyntax() : super(r'<color=(#[A-Fa-f0-9]{6})>(.*?)</color>');
+  ColorTagSyntax() : super(r"""<(?:color|font\s+color\s*)=['"]?(#[A-Fa-f0-9]{6})['"]?>(.*?)</(?:color|font)>""");
 
   @override
   bool onMatch(md.InlineParser parser, Match match) {
     final hexColor = match.group(1)!;
     final text = match.group(2)!;
-    final el = md.Element.text('color_tag', text);
+    // Allow nested tags (like furigana) inside color tags
+    // In markdown 7.3.1, we create a new parser instance for the inner text
+    final children = md.InlineParser(text, parser.document).parse();
+    final el = md.Element('color_tag', children);
     el.attributes['c'] = hexColor;
     parser.addNode(el);
     return true;
   }
 }
 
+class FuriganaTagSyntax extends md.InlineSyntax {
+  FuriganaTagSyntax() : super(r'([^\s<]+)<furigana:(.*?)\/>');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    final base = match.group(1)!;
+    final reading = match.group(2)!;
+    final el = md.Element.text('furigana_tag', base);
+    el.attributes['r'] = reading;
+    parser.addNode(el);
+    return true;
+  }
+}
+
+class FuriganaTagBuilder extends MarkdownElementBuilder {
+  final bool show;
+  FuriganaTagBuilder({required this.show});
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    final baseText = element.textContent;
+    final reading = element.attributes['r']!;
+    
+    if (!show) {
+      return Text(baseText, style: preferredStyle);
+    }
+    
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          reading,
+          style: (preferredStyle ?? const TextStyle()).copyWith(
+            fontSize: (preferredStyle?.fontSize ?? 14) * 0.6,
+            height: 0.5,
+          ),
+        ),
+        Text(
+          baseText,
+          style: preferredStyle,
+        ),
+      ],
+    );
+  }
+}
+
 class ColorTagBuilder extends MarkdownElementBuilder {
   final double fontSize;
-  ColorTagBuilder({required this.fontSize});
+  final bool show;
+  ColorTagBuilder({required this.fontSize, required this.show});
 
   @override
   Widget visitElementAfter(md.Element element, TextStyle? preferredStyle) {
     final colorStr = element.attributes['c']!;
-    final color = Color(int.parse('FF${colorStr.substring(1)}', radix: 16));
+    final color = show 
+      ? Color(int.parse('FF${colorStr.substring(1)}', radix: 16))
+      : (preferredStyle?.color ?? Colors.white70);
+    
     return Text(
       element.textContent,
-      style: preferredStyle?.copyWith(color: color, fontSize: fontSize, fontWeight: FontWeight.w600) ??
-          TextStyle(color: color, fontSize: fontSize, fontWeight: FontWeight.w600),
+      style: preferredStyle?.copyWith(color: color, fontSize: fontSize, fontWeight: show ? FontWeight.bold : FontWeight.normal) ??
+          TextStyle(color: color, fontSize: fontSize, fontWeight: show ? FontWeight.bold : FontWeight.normal),
     );
   }
 }
@@ -359,8 +454,35 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
   }
 
   void _speak(String text) async {
-    final clean = text.replaceAll(RegExp(r'<color=[^>]*>|</color>'), '');
-    await _tts.speak(clean);
+    // 1. Clean up tags and redundant text
+    // Remove Furigana tags: <furigana:かんじ/> -> empty
+    String cleanText = text.replaceAll(RegExp(r'<furigana:[^>]*/>'), '');
+    // Remove Color tags
+    cleanText = cleanText.replaceAll(RegExp(r'<(?:color|font\s+color\s*)=[^>]*>|</(?:color|font)>'), '');
+    // Remove Romaji lines specifically
+    cleanText = cleanText.split('\n').where((line) => !line.trim().startsWith('- Romaji:')).join('\n');
+    
+    // 2. Split into segments by line or punctuation to handle language switching
+    final segments = cleanText.split(RegExp(r'(?<=\n)|(?<=[.!?]\s)'));
+    
+    for (var segment in segments) {
+      if (segment.trim().isEmpty) continue;
+      
+      bool hasJapanese = RegExp(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]').hasMatch(segment);
+      String locale = hasJapanese ? 'ja-JP' : 'de-DE';
+      
+      // Remove prefixes like "- JP:" or "- DE:" for cleaner speech
+      String speakText = segment.replaceAll(RegExp(r'^- (?:JP|DE):\s*', caseSensitive: false), '').trim();
+      if (speakText.isEmpty) continue;
+
+      await _tts.setLanguage(locale);
+      await _tts.speak(speakText);
+      
+      // Wait for the segment to finish before moving to the next language/segment
+      // Note: flutter_tts doesn't always await perfectly on all platforms, 
+      // but this is the standard approach.
+      await Future.delayed(const Duration(milliseconds: 500)); 
+    }
   }
 
   void _scrollToBottom() {
@@ -436,6 +558,8 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
   @override
   Widget build(BuildContext context) {
     final messages = ref.watch(aiChatProvider);
+    final settings = ref.watch(settingsProvider);
+    final theme = Theme.of(context);
     final conversations = ref.watch(conversationsProvider);
     final isLoading = ref.watch(aiLoadingProvider);
 
@@ -484,14 +608,11 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
               onSelected: (value) {
                 if (value == 'settings') _showAiSettings(context);
                 if (value == 'unit') _showMakeUnitDialog();
-                if (value == 'deck') _showMakeDeckDialog();
               },
               itemBuilder: (context) => [
                 const PopupMenuItem(value: 'settings', child: Row(children: [Icon(Icons.settings, color: Colors.white54, size: 18), SizedBox(width: 8), Text('Einstellungen', style: TextStyle(color: Colors.white))])),
                 if (messages.isNotEmpty)
-                  const PopupMenuItem(value: 'unit', child: Row(children: [Icon(Icons.school, color: Colors.amber, size: 18), SizedBox(width: 8), Text('Export: Unit erstellen', style: TextStyle(color: Colors.white))])),
-                if (messages.isNotEmpty)
-                  const PopupMenuItem(value: 'deck', child: Row(children: [Icon(Icons.style, color: Colors.teal, size: 18), SizedBox(width: 8), Text('Export: Deck erstellen', style: TextStyle(color: Colors.white))])),
+                  const PopupMenuItem(value: 'unit', child: Row(children: [Icon(Icons.school, color: Colors.amber, size: 18), SizedBox(width: 8), Text('Lektion erstellen', style: TextStyle(color: Colors.white))])),
               ],
             ),
         ],
@@ -500,7 +621,7 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
           ? _buildPhoneCallOverlay(cardColor, borderColor, messages, isLoading)
           : _showHistory
               ? _buildHistoryPanel(conversations, cardColor, borderColor)
-              : _buildChatPanel(messages, isLoading, cardColor, borderColor),
+              : _buildChatPanel(messages, isLoading, cardColor, borderColor, settings),
     );
   }
 
@@ -552,7 +673,7 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 32),
                 child: Text(
-                  lastAiMsg.content.replaceAll(RegExp(r'<color=[^>]*>|</color>'), ''),
+                  lastAiMsg.content.replaceAll(RegExp(r"""<(?:color|font\s+color\s*)=[^>]*>|</(?:color|font)>"""), ''),
                   style: const TextStyle(color: Colors.white38, fontSize: 14),
                   maxLines: 4,
                   overflow: TextOverflow.ellipsis,
@@ -614,7 +735,7 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
 
   // ── Chat Panel ──
 
-  Widget _buildChatPanel(List<ChatMessage> messages, bool isLoading, Color cardColor, Color borderColor) {
+  Widget _buildChatPanel(List<ChatMessage> messages, bool isLoading, Color cardColor, Color borderColor, AppSettings settings) {
     return Column(
       children: [
         Expanded(
@@ -624,7 +745,7 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
                   controller: _scrollController,
                   padding: const EdgeInsets.all(16),
                   itemCount: messages.length,
-                  itemBuilder: (context, index) => _buildMessageBubble(messages[index], index, messages.length, cardColor, borderColor),
+                  itemBuilder: (context, index) => _buildMessageBubble(messages[index], index, messages.length, cardColor, borderColor, settings),
                 ),
         ),
         if (isLoading)
@@ -679,7 +800,7 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
 
   // ── Message Bubble ──
 
-  Widget _buildMessageBubble(ChatMessage msg, int index, int totalMessages, Color cardColor, Color borderColor) {
+  Widget _buildMessageBubble(ChatMessage msg, int index, int totalMessages, Color cardColor, Color borderColor, AppSettings settings) {
     final theme = Theme.of(context);
     return Align(
       alignment: msg.isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -710,15 +831,29 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
                   : MarkdownBody(
                       data: msg.content,
                       selectable: true,
-                      inlineSyntaxes: [ColorTagSyntax()],
-                      builders: {'color_tag': ColorTagBuilder(fontSize: 15)},
+                      extensionSet: md.ExtensionSet.gitHubFlavored,
+                      inlineSyntaxes: [
+                        ColorTagSyntax(),
+                        FuriganaTagSyntax(),
+                      ],
+                      builders: {
+                        'color_tag': ColorTagBuilder(
+                          fontSize: 15, 
+                          show: settings.showColorGrammar,
+                        ),
+                        'furigana_tag': FuriganaTagBuilder(
+                          show: settings.showFurigana,
+                        ),
+                      },
                       styleSheet: MarkdownStyleSheet(
-                        p: const TextStyle(color: Colors.white70, fontSize: 15),
-                        h1: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
-                        h2: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-                        h3: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                        p: const TextStyle(color: Colors.white70, fontSize: 15, height: 1.5),
+                        h1: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold, height: 2.0),
+                        h2: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, height: 1.8),
+                        h3: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold, height: 1.6),
                         listBullet: const TextStyle(color: Colors.amber, fontSize: 15),
                         strong: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        blockquote: const TextStyle(color: Colors.white54, fontStyle: FontStyle.italic),
+                        code: TextStyle(color: Colors.amber.shade200, backgroundColor: Colors.black26),
                       ),
                     ),
               if (!msg.isUser && msg.hasVersions)
@@ -769,7 +904,11 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
                     IconButton(
                       icon: const Icon(Icons.copy, size: 18, color: Colors.white38),
                       tooltip: 'Kopieren',
-                      onPressed: () {},
+                      onPressed: () {
+                        final clean = msg.content.replaceAll(RegExp(r'<color=[^>]*>|</color>'), '');
+                        Clipboard.setData(ClipboardData(text: clean));
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('In Zwischenablage kopiert'), duration: Duration(seconds: 1)));
+                      },
                       visualDensity: VisualDensity.compact,
                     ),
                   ],
@@ -890,8 +1029,6 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
     );
   }
 
-  // ── Make Unit/Deck Dialogs ──
-
   void _showMakeUnitDialog() {
     final convId = ref.read(activeConversationIdProvider);
     if (convId == null) return;
@@ -902,107 +1039,200 @@ class _AiChatScreenState extends ConsumerState<AiChatScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Unit aus Chat erstellen', style: TextStyle(color: Colors.white)),
+        title: const Text('Lerneinheit erstellen', style: TextStyle(color: Colors.white)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Beschreibe eventuelle Sonderwünsche für diese Unit (optional):', style: TextStyle(color: Colors.white70, fontSize: 13)),
-            const SizedBox(height: 12),
+            const Text('Aus diesem Chat eine Lerneinheit (Unit) generieren.', style: TextStyle(color: Colors.white70)),
+            const SizedBox(height: 16),
             TextField(
               controller: promptController,
-              maxLines: 3,
               style: const TextStyle(color: Colors.white),
               decoration: InputDecoration(
-                hintText: 'Zusatz-Instruktionen...',
-                hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
+                hintText: 'Zusätzliche Anweisungen...',
+                hintStyle: const TextStyle(color: Colors.white38),
                 filled: true,
                 fillColor: const Color(0xFF2A2A2A),
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
               ),
             ),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Abbrechen')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx), 
+            child: const Text('Abbrechen', style: TextStyle(color: Colors.white54))
+          ),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.amber, foregroundColor: Colors.black),
             onPressed: () {
               Navigator.pop(ctx);
-              _makeUnitFromChat(convId, additionalPrompt: promptController.text);
+              _makeUnitFromChat(convId, additionalPrompt: promptController.text.isNotEmpty ? promptController.text : null);
             },
-            child: const Text('Erstellen ✨'),
+            child: const Text('Generieren ✨'),
           ),
         ],
       ),
     );
   }
 
-  void _showMakeDeckDialog() {
-    final convId = ref.read(activeConversationIdProvider);
-    if (convId == null) return;
+
+  Future<void> _makeUnitFromChat(int conversationId, {String? additionalPrompt, int exerciseCount = 3, int taskCount = 5}) async {
+    final settings = ref.read(settingsProvider);
+    final aiService = ref.read(aiServiceProvider);
+    final aiRepo = ref.read(aiRepositoryProvider);
+    final unitRepo = ref.read(unitRepositoryProvider);
+    final vocabRepo = ref.read(vocabRepositoryProvider);
+
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Generiere Lerneinheit (Unit)...')));
     
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Vokabel-Deck erstellen', style: TextStyle(color: Colors.white)),
-        content: const Text('Soll ein neues Kartendeck aus allen bisher besprochenen Vokabeln dieses Chats erstellt werden?', style: TextStyle(color: Colors.white70)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Abbrechen')),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _makeDeckFromChat(convId);
-            },
-            child: const Text('Deck erstellen 🎴'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _makeUnitFromChat(int conversationId, {String? additionalPrompt}) async {
-    final settings = ref.read(settingsProvider);
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unit wird erstellt... Dies kann einen Moment dauern.')));
     try {
-      final res = await http.post(
-        Uri.parse('${settings.effectiveBackendUrl}/api/ai/make_unit_from_chat'),
-        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'conversation_id': conversationId,
-          'additional_prompt': additionalPrompt,
-        }),
-      ).timeout(const Duration(seconds: 180));
-      if (res.statusCode == 200 && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ Unit erfolgreich erstellt!'), backgroundColor: Colors.green));
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: ${res.statusCode}'), backgroundColor: Colors.red));
+      // 1. Get history
+      final messages = await aiRepo.getMessages(conversationId);
+      final chatContent = messages.map((m) => '${m.isUser ? "User" : "Assistant"}: ${m.content}').join('\n');
+      final mtName = settings.motherTongue == 'ja' ? 'Japanisch' : 'Deutsch';
+
+      // 2. Build Prompt (replicated from ai.py)
+      final sysPrompt = '''Du bist ein Kurs-Designer für Japanisch. 
+Erstelle eine Lerneinheit (Unit) basierend auf dem Chat-Inhalt.
+Antworte NUR im JSON-Format.''';
+
+      final userPrompt = '''Erstelle eine strukturierte Unit mit $exerciseCount Lektionen.
+Chat-Inhalt:
+$chatContent
+
+Zusatz-Instruktion: $additionalPrompt
+
+FORMAT-VORGABE (JSON):
+{
+  "title": "Unit Titel",
+  "description": "Beschreibung",
+  "lessons": [
+    {
+      "title": "Lektionstitel",
+      "description": "Was man lernt",
+      "lesson_type": "grammarIntro",
+      "grammar_explanation": "Ausführliche Erklärung in $mtName mit Beispielen",
+      "required_accuracy": 0.8,
+      "vocab": [
+        {"word": "私", "reading": "わたし", "translation": "Ich"}
+      ],
+      "exercises": [
+        {
+          "type": "multiple_choice",
+          "question": "Frage",
+          "instruction": "Anweisung",
+          "options": ["O1", "O2", "O3", "O4"],
+          "correctOption": "O1"
+        }
+      ]
+    }
+  ]
+}
+Gültige Lesson-Typen: vocabGate, grammarIntro, grammarProduction, mixedReinforcement, unitTest.
+Gültige Übungs-Typen: multiple_choice, typing, fill_in_blank, flashcard, matching, sentence_building.
+Gib NUR das JSON zurück.''';
+
+      final response = await aiService.queryAi(
+        prompt: userPrompt,
+        systemPrompt: sysPrompt,
+      );
+
+      // 3. Parse JSON
+      final Map<String, dynamic> unitData = jsonDecode(_cleanJsonResponse(response));
+      
+      // 4. Create Unit & Lessons
+      final unitId = 'ai_unit_${DateTime.now().millisecondsSinceEpoch}';
+      final List<Lesson> lessons = [];
+      final List<Vocab> unitVocab = [];
+
+      final List<dynamic> lessonsRaw = unitData['lessons'] ?? [];
+      for (int i = 0; i < lessonsRaw.length; i++) {
+        final l = lessonsRaw[i];
+        final lessonId = '${unitId}_l$i';
+        
+        final lesson = Lesson.fromMap({
+          ...l,
+          'id': lessonId,
+          'unitId': unitId,
+          'vocabularyList': l['vocab'] ?? [],
+        });
+        lessons.add(lesson);
+
+        // Collect vocab for the unit deck
+        for (final v in (l['vocab'] as List? ?? [])) {
+          unitVocab.add(Vocab(
+            deckId: 0, 
+            kanji: v['word'], 
+            kana: v['reading'], 
+            translation: v['translation'],
+            translationDe: settings.motherTongue == 'de' ? v['translation'] : null,
+            translationEn: settings.motherTongue == 'en' ? v['translation'] : null,
+            dueDate: DateTime.now().millisecondsSinceEpoch,
+          ));
+        }
+      }
+
+      final unit = Unit(
+        id: unitId,
+        title: unitData['title'] ?? 'Neue Lektion',
+        description: unitData['description'] ?? 'Durch KI generiert.',
+        lessons: lessons,
+        unitVocab: unitVocab,
+      );
+
+      // 5. Save Unit to DB
+      await unitRepo.insertUnit(unit);
+
+      // 6. Create a Deck for this unit (for SRS)
+      final deckId = await vocabRepo.insertDeck(Deck(
+        name: 'Unit: ${unit.title}',
+        deckType: DeckType.unit,
+        parentUnitId: unitId,
+        isAiGenerated: true,
+        createdAt: DateTime.now().millisecondsSinceEpoch,
+      ));
+
+      for (final v in unitVocab) {
+        await vocabRepo.insertVocabFromStrings(
+          deckId: deckId,
+          wordText: v.kanji ?? '',
+          readingText: v.kana,
+          translationText: v.translation,
+        );
+      }
+
+      if (mounted) {
+        // Invalidate providers
+        ref.invalidate(unitsProvider);
+        ref.invalidate(decksProvider);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ Lerneinheit erfolgreich erstellt!'), backgroundColor: Colors.green));
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red));
     }
   }
 
-  Future<void> _makeDeckFromChat(int conversationId) async {
-    final settings = ref.read(settingsProvider);
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('jwt_token') ?? '';
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Deck wird erstellt...')));
-    try {
-      final res = await http.post(
-        Uri.parse('${settings.effectiveBackendUrl}/api/ai/make_deck_from_chat'),
-        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
-        body: jsonEncode({'conversation_id': conversationId}),
-      ).timeout(const Duration(seconds: 120));
-      if (res.statusCode == 200 && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ Deck erfolgreich erstellt!'), backgroundColor: Colors.green));
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: ${res.statusCode}'), backgroundColor: Colors.red));
-      }
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red));
+  String _cleanJsonResponse(String raw) {
+    String clean = raw.trim();
+    if (clean.contains('```json')) {
+      clean = clean.split('```json')[1].split('```')[0].trim();
+    } else if (clean.contains('```')) {
+      clean = clean.split('```')[1].split('```')[0].trim();
     }
+    // Remove potential leading/trailing text if the AI didn't follow "ONLY JSON"
+    final startBracket = clean.indexOf('[');
+    final lastBracket = clean.lastIndexOf(']');
+    if (startBracket != -1 && lastBracket != -1 && lastBracket > startBracket) {
+      return clean.substring(startBracket, lastBracket + 1);
+    }
+    final startObj = clean.indexOf('{');
+    final lastObj = clean.lastIndexOf('}');
+    if (startObj != -1 && lastObj != -1 && lastObj > startObj) {
+      return clean.substring(startObj, lastObj + 1);
+    }
+    return clean;
   }
 
   // ── Settings Dialog ──
@@ -1066,8 +1296,8 @@ class AiSettingsDialog extends ConsumerWidget {
             // ── Display ──
             Text(s.isGerman ? 'ANZEIGE' : 'DISPLAY', style: const TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1)),
             const SizedBox(height: 4),
-            _compactSwitch(s.showRomaji, settings.showRomajiInChat, (v) => notifier.toggleRomajiInChat(v)),
-            _compactSwitch(s.showFurigana, settings.showHiraganaInChat, (v) => notifier.toggleHiraganaInChat(v)),
+            _compactSwitch(s.showRomaji, settings.showRomajiInChat, (v) => notifier.toggleShowRomajiInChat(v)),
+            _compactSwitch(s.showFurigana, settings.showHiraganaInChat, (v) => notifier.toggleShowHiraganaInChat(v)),
             _compactSwitch(s.colorGrammar, settings.colorGermanSentences, (v) => notifier.toggleColorGerman(v)),
             const Divider(color: Colors.white12, height: 16),
             
